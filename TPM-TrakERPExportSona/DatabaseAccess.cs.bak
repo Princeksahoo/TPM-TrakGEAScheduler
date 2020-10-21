@@ -1,0 +1,549 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.IO;
+using System.Data.SqlClient;
+using System.Data;
+using System.Reflection;
+using System.Threading;
+using System.Configuration;
+using OfficeOpenXml;
+using System.Xml.Linq;
+using System.Linq;
+
+namespace WiproExportToExcel
+{
+	public static class DatabaseAccess
+	{
+		static string appPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+		static string productionDataPath = Path.Combine(appPath, "XMLFiles", "productionData");
+		static string DownDataPath = Path.Combine(appPath, "XMLFiles", "DownData");
+		static string BreakdownDataPath = Path.Combine(appPath, "XMLFiles", "BreakdownData");
+		static string ftpproductionDataPath = ConfigurationManager.AppSettings["ftpPathProductionData"].ToString();
+		static string ftpDownDataPath = ConfigurationManager.AppSettings["ftpPathLossData"].ToString();
+		static string ftpBreakdownDataPath = ConfigurationManager.AppSettings["ftpPathBreakdownDataBreakdown"].ToString();
+		static string _FTPHostIP = ConfigurationManager.AppSettings["FTPServer"].ToString();
+		static string _FTPUser = ConfigurationManager.AppSettings["UserID"].ToString();
+		static string _FTPPassword = ConfigurationManager.AppSettings["Password"].ToString();
+
+
+		public static bool AggregateERPDataSona(string Startdate)
+		{
+			bool succ = false;
+			SqlConnection conn = ConnectionManager.GetConnection();
+			try
+			{
+				var cmd = new SqlCommand("s_GetSONA_ProductionAndDownData_TPM2SAP", conn);
+				cmd.CommandTimeout = 600;
+				cmd.CommandType = System.Data.CommandType.StoredProcedure;
+				cmd.Parameters.AddWithValue("@StartDate", Startdate);
+				cmd.ExecuteNonQuery();
+				succ = true;
+				Logger.WriteDebugLog("s_GetSONA_ProductionAndDownData_TPM2SAP executed for time period from " + Startdate);
+			}
+			catch (Exception ex)
+			{
+				Logger.WriteErrorLog(ex.Message);
+			}
+			finally
+			{
+				if (conn != null) conn.Close();
+			}
+			return succ;
+		}
+
+        public static bool AggregateERPDataSona(string Startdate, string machineID)
+        {
+            bool succ = false;
+            SqlConnection conn = ConnectionManager.GetConnection();
+            try
+            {
+                Logger.WriteDebugLog("From Release request - executing GetSONA_ProductionAndDownData_TPM2SAP for machines " + machineID + "; date " + Startdate);
+                var cmd = new SqlCommand("s_GetSONA_ProductionAndDownData_TPM2SAP", conn);
+                cmd.CommandTimeout = 600;
+                cmd.CommandType = System.Data.CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@StartDate", Startdate);
+                cmd.Parameters.AddWithValue("@MachineID", machineID);
+                cmd.ExecuteNonQuery();
+                succ = true;
+                Logger.WriteDebugLog("Completed GetSONA_ProductionAndDownData_TPM2SAP");
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteErrorLog(ex.Message);
+            }
+            finally
+            {
+                if (conn != null) conn.Close();
+            }
+            return succ;
+        }
+      
+        public static void ExportToCSV(string type)
+        {
+            string appPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+
+            SqlConnection conn = ConnectionManager.GetConnection();
+            SqlDataReader sdr = null;
+
+            long maxID = long.MinValue;
+            List<Production> prodlist = new List<Production>();
+            Production proddata = null;
+            List<Loss> Downlist = new List<Loss>();
+            Loss downdata = null;
+            XDocument xdoc = null;
+            string query = string.Empty;
+            if (type.Equals("Production"))
+                query = "Select * from [dbo].[SONA_ProductionData_TPM2SAP] where (Status=0 or Status is null) AND Mode in ('N','R')  order by SlNo;Select MAX(SlNo) as maxID from [dbo].[SONA_ProductionData_TPM2SAP] where (Status=0 or Status is null)  AND Mode in ('N','R')";
+            else if (type.Equals("Down"))
+                query = "Select * from [dbo].[SONA_DownData_TPM2SAP] where (Status=0 or Status is null) AND Mode in ('N','R')  order by SlNo;Select MAX(SlNo) as maxID from [dbo].[SONA_DownData_TPM2SAP] where (Status=0 or Status is null)  AND Mode in ('N','R')";
+            try
+            {
+                SqlCommand cmd = new SqlCommand(query, conn);
+                cmd.CommandType = CommandType.Text;
+                sdr = cmd.ExecuteReader();
+                if (sdr.HasRows)
+                {
+                    if (type.Equals("Production"))
+                    {
+                        while (sdr.Read())
+                        {
+                            try
+                            {                               
+                                proddata = new Production();
+                                proddata.PlanNo = sdr["PlanNo"].ToString();
+                                proddata.Plant = sdr["PlantID"].ToString();
+                                proddata.EquipmentId = sdr["EquipmentID"].ToString();
+                                proddata.FGMaterialId = sdr["FGMaterialID"].ToString();
+                                proddata.PV = sdr["PVNo"].ToString();
+                                proddata.FGBatchID = sdr["FGBatchID"].ToString();
+                                proddata.ChildBatchID = sdr["ChildBatchID"].ToString();
+                                proddata.ProducedQty = Convert.ToInt32(sdr["ProducedQty"]);
+                                proddata.ProductionTime = sdr["ProductionTime"].ToString();
+                                proddata.BatchStart = Convert.ToDateTime(sdr["BatchStart"].ToString()).ToString("yyyy-MM-ddTHH:mm:ss");
+                                proddata.BatchEnd = Convert.ToDateTime(sdr["BatchEnd"].ToString()).ToString("yyyy-MM-ddTHH:mm:ss");
+                                proddata.RecordedTS = Convert.ToDateTime(sdr["RecordedTS"].ToString()).ToString("yyyy-MM-ddTHH:mm:ss");
+                                proddata.SetupTime = sdr["SetupTime"].ToString();
+
+                                prodlist.Add(proddata);
+                            }
+                            catch (Exception exx)
+                            {
+                                Logger.WriteErrorLog(exx.ToString());
+                            }
+
+                        }
+                        try
+                        {
+                            xdoc = new XDocument(
+                                new XElement("ProductionInfo",
+                                from prod in prodlist
+                                select new XElement("prod",
+                                new XAttribute("PlanNo", prod.PlanNo),
+                                new XAttribute("Plant", prod.Plant),
+                                new XAttribute("EquipmentId", prod.EquipmentId),
+                                new XAttribute("FGMaterialId", prod.FGMaterialId),
+                                new XAttribute("PV", prod.PV),
+                                new XAttribute("BatchStart", prod.BatchStart),
+                                new XAttribute("BatchEnd", prod.BatchEnd),
+                                new XAttribute("RecordedTS", prod.RecordedTS),
+                                new XAttribute("FGBatchID", prod.FGBatchID),
+                                new XAttribute("ChildBatchID", prod.ChildBatchID),
+                                new XAttribute("ProducedQty", prod.ProducedQty),
+                                new XAttribute("SetupTime", prod.SetupTime),
+                                new XAttribute("MachineTime", prod.ProductionTime)
+                                )));
+
+                            string localPath = Path.Combine(productionDataPath, "UnProcessed", string.Format("Prod_{0}.xml", DateTime.Now.ToString("yyyyMMddHHmmss")));
+                            xdoc.Save(localPath);
+                            SSHClient sshClient = new SSHClient(_FTPHostIP, _FTPUser, _FTPPassword);
+                            if (sshClient.Connect())
+                            {
+                                if (sshClient.Upload(ftpproductionDataPath, localPath))
+                                {
+                                    sdr.NextResult();
+                                    if (sdr.Read())
+                                    {
+                                        if (!Convert.IsDBNull(sdr["MaxID"]) && !string.IsNullOrEmpty(sdr["MaxID"].ToString()))
+                                        {
+                                            maxID = Convert.ToInt64(sdr["MaxID"].ToString());
+                                        }
+                                        UpdateStatus(maxID, type);
+                                    }
+                                }
+                                sshClient.DisConnect();
+                            }
+
+                        }
+                        catch (Exception exx)
+                        {
+                            Logger.WriteErrorLog(exx.ToString());
+                        }
+
+                    }
+                    else if (type.Equals("Down"))
+                    {
+                        while (sdr.Read())
+                        {
+                            try
+                            {                               
+                                downdata = new Loss();
+                                downdata.EquipmentId = sdr["EquipmentID"].ToString();
+                                downdata.AssetID = sdr["AssetID"].ToString();
+                                downdata.Operator = sdr["Operator"].ToString();
+                                downdata.DownCode = sdr["Downcode"].ToString();
+                                downdata.FromTime = Convert.ToDateTime(sdr["DownStartTime"].ToString()).ToString("yyyy-MM-ddTHH:mm:ss");
+                                downdata.ToTime = Convert.ToDateTime(sdr["DownEndTime"].ToString()).ToString("yyyy-MM-ddTHH:mm:ss");
+                                downdata.DownTime = sdr["Downtime"].ToString();
+                                downdata.PlanNo = sdr["PlanNo"].ToString();
+                                Downlist.Add(downdata);
+                            }
+                            catch (Exception exx)
+                            {
+                                Logger.WriteErrorLog(exx.ToString());
+                            }
+
+                        }
+                        try
+                        {
+                            xdoc = new XDocument(
+                                   new XElement("Losses",
+                                from down in Downlist
+                                select new XElement("Loss",
+                                 new XAttribute("PlanNo", down.PlanNo),
+                                new XAttribute("EquipmentId", down.EquipmentId),
+                                new XAttribute("AssetID", down.AssetID),
+                                new XAttribute("Operator", down.Operator),
+                                new XAttribute("Downcode", down.DownCode),
+                                new XAttribute("DownStartTime", down.FromTime),
+                                new XAttribute("DownEndTime", down.ToTime),
+                                new XAttribute("DownTime", down.DownTime))));
+
+
+                            string localPath = Path.Combine(DownDataPath, "UnProcessed", string.Format("Loss_{0}.xml", DateTime.Now.ToString("yyyyMMddHHmmss")));
+
+                            SSHClient sshClient = null;
+                            xdoc.Save(localPath);
+                            try
+                            {
+                                sshClient = new SSHClient(_FTPHostIP, _FTPUser, _FTPPassword);
+                                if (sshClient.Connect())
+                                {
+                                    if (sshClient.Upload(ftpDownDataPath, localPath))
+                                    {
+                                        Logger.WriteDebugLog("Down Data Uploaded to FTP");
+                                        sdr.NextResult();
+                                        if (sdr.Read())
+                                        {
+                                            if (!Convert.IsDBNull(sdr["MaxID"]) && !string.IsNullOrEmpty(sdr["MaxID"].ToString()))
+                                            {
+                                                maxID = Convert.ToInt64(sdr["MaxID"].ToString());
+                                            }
+                                            UpdateStatus(maxID, type);
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception exx)
+                            {
+                                Logger.WriteErrorLog(exx.ToString());
+                            }
+                            finally
+                            {
+                                if (sshClient != null)
+                                    sshClient.DisConnect();
+                            }
+                        }
+                        catch (Exception exx)
+                        {
+                            Logger.WriteErrorLog(exx.ToString());
+                        }
+                    }
+                }
+            }
+            catch (Exception exx)
+            {
+                Logger.WriteErrorLog(exx.ToString());
+            }
+            finally
+            {
+                if (sdr != null) sdr.Close();
+                if (conn != null) conn.Close();
+            }
+        }
+
+        public static void UpdateStatus(long maxID, string type)
+		{
+			SqlConnection conn = ConnectionManager.GetConnection();
+			string sqlStr = string.Empty;
+			try
+			{
+				if (type.Equals("Production"))
+					sqlStr = "Update [dbo].[SONA_ProductionData_TPM2SAP] Set Status=1 where SlNo <=@maxID";
+				else if (type.Equals("Down"))
+					sqlStr = "Update [dbo].[SONA_DownData_TPM2SAP] Set Status=1 where SlNo <=@maxID";
+				var cmd = new SqlCommand(sqlStr, conn);
+				cmd.CommandType = System.Data.CommandType.Text;
+				cmd.Parameters.AddWithValue("@maxID", maxID);
+				cmd.ExecuteNonQuery();
+				Logger.WriteDebugLog("Status Updated for " + type + " : ID <= " + maxID);
+			}
+			catch (Exception ex)
+			{
+				Logger.WriteErrorLog(ex.Message);
+			}
+			finally
+			{
+				if (conn != null) conn.Close();
+			}
+		}
+
+		public static void BreakDownExportToCSV(string type)
+		{
+			SqlConnection conn = ConnectionManager.GetConnection();
+			SqlDataReader sdr = null;
+
+			long maxID = long.MinValue;
+			List<BreakDown> BreakDownList = new List<BreakDown>();
+			BreakDown BreakdownData = null;
+			string query = string.Empty;
+			XDocument xdoc = null;
+			query = "Select * from [dbo].[SONA_BreakDownNotification_TPM2SAP] where Status=0 or Status is null;Select MAX(SlNo) as maxID from [dbo].[SONA_BreakDownNotification_TPM2SAP] where Status=0 or Status is null";
+
+			try
+			{
+				SqlCommand cmd = new SqlCommand(query, conn);
+				cmd.CommandType = CommandType.Text;
+				sdr = cmd.ExecuteReader();
+				if (sdr.HasRows)
+				{
+					while (sdr.Read())
+					{
+						try
+						{
+							//sb.AppendLine(string.Format("\"{0}\"" + "," + "\"{1}\"" + "," + "\"{2}\"" + "," + "\"{3}\"" + "," + "\"{4}\"" + "," + "{5}" + "," + "\"{6}\"", 
+							//sdr["AssetID"].ToString(), sdr["AssetDescription"].ToString(), sdr["Operator"].ToString(), sdr["Downcatagory"].ToString(), sdr["Downcode"].ToString(), 
+							//Convert.ToDateTime(sdr["BreakdownTime"].ToString()).ToString("yyyyMMddHHmmss"), sdr["BreakDownStatus"].ToString()));
+							BreakdownData = new BreakDown();
+							BreakdownData.AssetID = sdr["AssetID"].ToString();
+							BreakdownData.AssetDesc = sdr["AssetDescription"].ToString();
+							//BreakdownData.Operator = sdr["Operator"].ToString();
+							BreakdownData.Category = sdr["Downcatagory"].ToString();
+							BreakdownData.BreakdownPhenomenon = sdr["Downcode"].ToString();
+							BreakdownData.TimeStamp = Convert.ToDateTime(sdr["BreakdownTime"].ToString());
+							BreakdownData.BreakDownEvent = sdr["BreakDownStatus"].ToString();
+							BreakDownList.Add(BreakdownData);
+						}
+						catch (Exception exx)
+						{
+							Logger.WriteErrorLog(exx.ToString());
+						}
+					}
+					try
+					{
+						xdoc = new XDocument(
+								new XElement("BreakDowns",
+								from breakdown in BreakDownList
+								select new XElement("BreakDown",
+								new XAttribute("AssetID", breakdown.AssetID),
+								new XAttribute("AssetDesc", breakdown.AssetDesc),
+								//new XAttribute("Operator", breakdown.Operator),
+								new XAttribute("Category", breakdown.Category),
+								new XAttribute("BreakdownPhenomenon", breakdown.BreakdownPhenomenon),
+								new XAttribute("Date", breakdown.TimeStamp.ToString("yyyy-MM-dd")),
+                                new XAttribute("Time", breakdown.TimeStamp.ToString("HH:mm:ss")),
+								new XAttribute("BreakDownEvent", breakdown.BreakDownEvent))));
+					}
+					catch (Exception exx)
+					{
+						Logger.WriteErrorLog(exx.Message);
+					}
+				}
+
+				#region MyRegion
+				if (xdoc != null)
+				{
+					try
+					{
+						string localPath = Path.Combine(BreakdownDataPath, "UnProcessed", string.Format("Breakdown_{0}.xml", DateTime.Now.ToString("yyyyMMddHHmmss")));
+						xdoc.Save(localPath);
+						Logger.WriteDebugLog("Breakdown Data Exported to xml");
+
+						SSHClient sshClient = new SSHClient(_FTPHostIP, _FTPUser, _FTPPassword);
+						if (sshClient.Connect())
+						{
+							if (sshClient.Upload(ftpBreakdownDataPath, localPath))
+							{
+								sshClient.DisConnect();
+								sdr.NextResult();
+								if (sdr.Read())
+								{
+									if (!Convert.IsDBNull(sdr["MaxID"]) && !string.IsNullOrEmpty(sdr["MaxID"].ToString()))
+									{
+										maxID = Convert.ToInt64(sdr["MaxID"].ToString());
+									}
+								}
+								Logger.WriteDebugLog(string.Format("Uploaded file {0} to FTP", localPath));
+								UpdateStatusBreakDown(maxID, type);
+							}
+						}
+					}
+					catch (Exception ex)
+					{
+						Logger.WriteErrorLog(ex.ToString());
+					}
+				}
+				#endregion
+
+			}
+			catch (Exception exx)
+			{
+				Logger.WriteErrorLog(exx.ToString());
+			}
+			finally
+			{
+				if (sdr != null) sdr.Close();
+				if (conn != null) conn.Close();
+			}
+		}
+
+		public static void UpdateStatusBreakDown(long maxID, string type)
+		{
+			SqlConnection conn = ConnectionManager.GetConnection();
+			string sqlStr = string.Empty;
+			try
+			{
+				sqlStr = "Update [dbo].[SONA_BreakDownNotification_TPM2SAP] Set Status=1 where SlNo <=@maxID";
+				var cmd = new SqlCommand(sqlStr, conn);
+				cmd.CommandType = System.Data.CommandType.Text;
+				cmd.Parameters.AddWithValue("@maxID", maxID);
+				cmd.ExecuteNonQuery();
+				Logger.WriteDebugLog("Status Updated for " + type + " : ID <= " + maxID);
+			}
+			catch (Exception ex)
+			{
+				Logger.WriteErrorLog(ex.Message);
+			}
+			finally
+			{
+				if (conn != null) conn.Close();
+			}
+		}
+
+        internal static List<string> GetPreReleaseRequest_TPM2SAP()
+        {
+            List<string> machines = new List<string>();
+            SqlConnection conn = ConnectionManager.GetConnection();
+            SqlDataReader sdr = null;
+            try
+            {
+                SqlCommand cmd = new SqlCommand(@"s_GetSONA_InvReservationPreReleaseRequest_TPM2SAP", conn);
+                cmd.CommandType = CommandType.StoredProcedure;                
+                sdr = cmd.ExecuteReader();
+                while (sdr.Read())
+                {
+                    machines.Add(sdr["EquipmentID"].ToString());
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteErrorLog(ex.ToString());
+            }
+            finally
+            {
+                if (sdr != null) sdr.Close();
+                if (conn != null) conn.Close();
+            }
+            return machines;
+        }
+
+        internal static void UpdatePreReleaseRequest_TPM2SAP(List<string> machines)
+        {           
+            SqlConnection conn = ConnectionManager.GetConnection();          
+            try
+            {
+                foreach (var machine in machines)
+                {
+                    SqlCommand cmd = new SqlCommand(@"UPDATE SONA_InvReservationPreReleaseRequest_TPM2SAP SET RequestStatus = 1 where EquipmentID=@EquipmentID", conn);
+                    cmd.Parameters.AddWithValue("@EquipmentID", machine);
+                    cmd.CommandType = CommandType.Text;
+                    cmd.ExecuteNonQuery();
+                }
+                              
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteErrorLog(ex.ToString());
+            }
+            finally
+            {               
+                if (conn != null) conn.Close();
+            }          
+        }
+
+
+        internal static void AggBreakdowndata()
+        {
+            bool succ = false;
+            SqlConnection conn = ConnectionManager.GetConnection();
+            try
+            {
+                var cmd = new SqlCommand("s_GetSONA_BreakdownNotification_TPM2SAP", conn);
+                cmd.CommandTimeout = 600;
+                cmd.CommandType = System.Data.CommandType.StoredProcedure;
+              
+                cmd.ExecuteNonQuery();
+                succ = true;
+                Logger.WriteDebugLog("s_GetSONA_BreakdownNotification_TPM2SAP executed ");
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteErrorLog(ex.Message);
+            }
+            finally
+            {
+                if (conn != null) conn.Close();
+            }         
+        }
+    }
+
+	public class Production
+	{
+		public string PlanNo { get; set; }
+		public string Plant { get; set; }
+		public string EquipmentId { get; set; }
+		public string FGMaterialId { get; set; }
+		public string PV { get; set; }
+		public string FGBatchID { get; set; }
+		public string ChildBatchID { get; set; }
+		public int ProducedQty { get; set; }
+		public string ProductionTime { get; set; }
+		public string BatchStart { get; set; }
+		public string BatchEnd { get; set; }
+		public string RecordedTS { get; set; }
+        public string SetupTime { get; set; }       
+    }
+
+	public class BreakDown
+	{
+		public string AssetID { get; set; }
+		public string AssetDesc { get; set; }
+		public string Operator { get; set; }
+		public string Category { get; set; }
+		public string BreakdownPhenomenon { get; set; }
+		public DateTime TimeStamp { get; set; }
+		public string BreakDownEvent { get; set; }
+	}
+
+	public class Loss
+	{
+		public string EquipmentId { get; set; }
+		public string AssetID { get; set; }
+		public string Operator { get; set; }
+		public string DownCode { get; set; }
+		public string FromTime { get; set; }
+		public string ToTime { get; set; }
+        public string PlanNo { get; set; }
+        public string DownTime { get; set; }
+    }
+}
